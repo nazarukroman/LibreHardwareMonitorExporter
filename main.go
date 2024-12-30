@@ -3,42 +3,45 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"net/http"
+	"os"
 	"strings"
+
+	"github.com/joho/godotenv"
 )
 
+// Структура Sensor с экспортируемыми полями
 type Sensor struct {
-	id       int
-	Text     string
-	Min      string
-	Value    string
-	Max      string
-	ImageUrl string
-	SensorId *string
-	Type     *string
-	Children []*Sensor
+	ID       int       `json:"id"`
+	Text     string    `json:"Text"`
+	Min      string    `json:"Min"`
+	Value    string    `json:"Value"`
+	Max      string    `json:"Max"`
+	ImageUrl string    `json:"ImageUrl"`
+	SensorId *string   `json:"SensorId"`
+	Type     *string   `json:"Type"`
+	Children []*Sensor `json:"Children"`
 }
 
+// Функция для получения данных с сервера
 func fetchSensors() (Sensor, error) {
-	resp, err := http.Get("http://192.168.1.149:8085/data.json")
+	libreHost := os.Getenv("LIBRE_IP")
 
+	url := fmt.Sprintf("http://%s/data.json", libreHost)
+	resp, err := http.Get(url)
 	if err != nil {
 		return Sensor{}, fmt.Errorf("error making GET request: %w", err)
 	}
-
 	defer resp.Body.Close()
 
-	body, err := ioutil.ReadAll(resp.Body)
-
+	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return Sensor{}, fmt.Errorf("error reading response body: %w", err)
 	}
 
-	// Распарсить JSON в структуру Sensor
 	var sensors Sensor
 	err = json.Unmarshal(body, &sensors)
-
 	if err != nil {
 		return Sensor{}, fmt.Errorf("error unmarshaling JSON: %w", err)
 	}
@@ -55,73 +58,83 @@ func makeSensorId(prefix, id, text string) string {
 	for i := range joinedText {
 		joinedText[i] = strings.ToLower(joinedText[i])
 	}
-	
+
 	return fmt.Sprintf("%s%s_%s", prefix, strings.Join(sensorsWithoutEndingIndex, "_"), strings.Join(joinedText, "_"))
 }
 
 // Функция для создания метрики
-func makeMetric(sensor Sensor) string {
+func makeMetric(hostName string, sensor Sensor) string {
 	splittedText := strings.Split(sensor.Text, " ")
 
-	// Преобразуем слова в нижний регистр
 	for i := range splittedText {
 		splittedText[i] = strings.ToLower(splittedText[i])
 	}
 
-	// Объединяем слова через символ "_"
 	joinedText := strings.Join(splittedText, "_")
 	valueWithoutUnit := strings.Split(sensor.Value, " ")[0]
 
-	// Формируем метрику
-	return fmt.Sprintf(`{host="winnerborn-desktop",objectname="%s"} %s`, joinedText, valueWithoutUnit)
+	return fmt.Sprintf(`{host="%s",objectname="%s"} %s`, hostName, joinedText, valueWithoutUnit)
 }
 
 // Функция для подготовки метрик
-func sensorsToPrometheusMetrics(sensor Sensor, prefix string) []string {
+func sensorsToPrometheusMetrics(hostName string, sensor *Sensor, prefix string) []string {
 	var metrics []string
 
-	// Проверяем, есть ли SensorId и Type
 	if sensor.SensorId != nil && sensor.Type != nil {
-		// Генерируем sensorId
 		sensorId := makeSensorId(prefix, *sensor.SensorId, sensor.Text)
-		metric := makeMetric(sensor)
+		metric := makeMetric(hostName, *sensor)
+		metrics = append(metrics, fmt.Sprintf("%s%s", sensorId, metric))
+	}
 
-		metrics = append(metrics, sensorId, metric)
-	} else if len(sensor.Children) > 0 {
-		// Если есть дочерние элементы, рекурсивно вызываем prepare для каждого дочернего сенсора
-		for _, child := range sensor.Children {
-			metrics = append(metrics, sensorsToPrometheusMetrics(*child, prefix)...)
-		}
+	for _, child := range sensor.Children {
+		metrics = append(metrics, sensorsToPrometheusMetrics(hostName, child, prefix)...)
 	}
 
 	return metrics
 }
 
+func getHostName(sensor Sensor) string {
+	return sensor.Children[0].Text
+}
+
+// Обработчик для маршрута /metrics
 func metricsHandler(w http.ResponseWriter, r *http.Request) {
-	// Вызываем fetchSensors
+	prefix := os.Getenv("PREFIX")
+
 	sensors, err := fetchSensors()
 
 	if err != nil {
-		// Обрабатываем ошибку
 		http.Error(w, fmt.Sprintf("Failed to fetch sensors: %v", err), http.StatusInternalServerError)
 		return
 	}
 
-	// Генерируем метрики
-	metrics := sensorsToPrometheusMetrics(&sensors, "libre")
+	hostname := getHostName(sensors)
+	metrics := sensorsToPrometheusMetrics(hostname, &sensors, prefix)
+	response := strings.Join(metrics, "\n")
 
-	// Отправляем метрики в ответ
 	w.Header().Set("Content-Type", "text/plain")
-	_, _ = w.Write([]byte(metrics))
+	_, _ = w.Write([]byte(response))
 }
 
+// Главная функция
 func main() {
-	http.HandleFunc("/metrics", metricsHandler)
+	err := godotenv.Load()
 
-	fmt.Println("Server is running on http://localhost:8080")
-
-	if err := http.ListenAndServe(":8080", nil); err != nil {
-		fmt.Println("Error starting server:", err)
+	if err != nil {
+		fmt.Println("Error loading .env file")
 	}
 
+	port := os.Getenv("PORT")
+
+	if port == "" {
+		port = "3000" // Значение по умолчанию
+	}
+
+	http.HandleFunc("/metrics", metricsHandler)
+
+	fmt.Printf("Server is running on http://localhost:%s\n", port)
+
+	if err := http.ListenAndServe(":"+port, nil); err != nil {
+		fmt.Println("Error starting server:", err)
+	}
 }
