@@ -1,0 +1,16 @@
+services:
+  librehardwaremonitorexporter:
+    image: librehardwaremonitorexporter
+    container_name: librehardwaremonitorexporter
+    restart: unless-stopped
+    networks:
+      proxy:
+    ports:
+      - "7070:7070"
+    env_file:
+      - .env
+
+networks:
+  proxy:
+    name: proxy
+    external: true
